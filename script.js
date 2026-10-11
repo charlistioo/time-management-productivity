@@ -10,14 +10,23 @@
  *   deadlineGrace: string (ISO),
  *   deadlineHard: string (ISO),
  *   createdAt: string (ISO),
+ *   activeStartTime: string | null,  ← waktu Mulai ditekan (null = idle)
+ *   records: TaskRecord[],           ← riwayat penyelesaian task
  *   milestones: Milestone[]
+ * }
+ * Format TaskRecord: {
+ *   id: string,
+ *   startTime: string (ISO),
+ *   endTime: string (ISO),
+ *   duration: string,                ← "1j 23m 45d"
+ *   status: 'on-target' | 'grace' | 'overdue'
  * }
  * Format milestone: {
  *   id: string,
  *   name: string,
- *   records: Record[]
+ *   records: MilestoneRecord[]
  * }
- * Format record: {
+ * Format MilestoneRecord: {
  *   id: string,
  *   startTime: string (ISO),
  *   endTime: string (ISO),
@@ -143,13 +152,21 @@ function determineStatus(endTimeISO, deadlineTarget, deadlineGrace, deadlineHard
 // ============================================================
 
 /**
- * Baca semua task dari localStorage
+ * Baca semua task dari localStorage.
+ * Migrasi otomatis task lama yang belum punya field baru.
  * @returns {Array}
  */
 function loadTasks() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const tasks = JSON.parse(raw);
+    // Migrasi: tambahkan field baru ke task lama yang tidak memilikinya
+    tasks.forEach(t => {
+      if (!Object.prototype.hasOwnProperty.call(t, 'activeStartTime')) t.activeStartTime = null;
+      if (!Object.prototype.hasOwnProperty.call(t, 'records')) t.records = [];
+    });
+    return tasks;
   } catch {
     return [];
   }
@@ -201,6 +218,19 @@ function deleteRecord(taskId, milestoneId, recordId) {
   saveTasks(tasks);
 }
 
+/**
+ * Hapus satu TaskRecord dari task tertentu
+ * @param {string} taskId
+ * @param {string} recordId
+ */
+function deleteTaskRecord(taskId, recordId) {
+  const tasks = loadTasks();
+  const task = tasks.find(t => t.id === taskId);
+  if (!task) return;
+  task.records = (task.records || []).filter(r => r.id !== recordId);
+  saveTasks(tasks);
+}
+
 // ============================================================
 // RENDER FUNCTIONS
 // ============================================================
@@ -238,10 +268,13 @@ function renderTaskCard(task) {
   card.setAttribute('role', 'listitem');
   card.dataset.taskId = task.id;
 
+  // Tentukan apakah task sedang aktif (sudah ditekan Mulai)
+  const isActive = !!task.activeStartTime;
+
   card.innerHTML = `
     <!-- Header task -->
     <div class="flex items-start justify-between gap-3 p-5 pb-4">
-      <div class="min-w-0">
+      <div class="min-w-0 flex-1">
         <h3 class="text-base font-semibold text-white truncate" title="${escHtml(task.name)}">${escHtml(task.name)}</h3>
         <p class="text-xs text-gray-500 mt-0.5">Dibuat: ${formatDateTime(task.createdAt)}</p>
       </div>
@@ -264,6 +297,50 @@ function renderTaskCard(task) {
         ${renderDeadlineCard('Harus Kumpul', task.deadlineHard, 'red')}
       </div>
     </div>
+
+    <!-- ===== TOMBOL MULAI / SELESAI ===== -->
+    <div class="border-t border-gray-800 px-5 py-4">
+      <div class="flex items-center gap-3 flex-wrap">
+        ${isActive ? `
+          <!-- Task sedang berjalan: tampilkan timer dan tombol Selesai -->
+          <button
+            class="btn-stop-task flex items-center gap-2 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-semibold text-sm px-5 py-2.5 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-red-400"
+            data-task-id="${task.id}"
+            aria-label="Selesaikan task ${escHtml(task.name)}">
+            <svg class="w-4 h-4 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2"/>
+            </svg>
+            Selesai
+          </button>
+          <!-- Live elapsed timer -->
+          <span class="task-elapsed-timer font-mono text-sm font-bold text-red-400 tabular-nums" data-start="${task.activeStartTime}" aria-live="polite" aria-label="Waktu berjalan">
+            ${formatDuration(task.activeStartTime, new Date().toISOString())}
+          </span>
+          <span class="text-xs text-gray-500">Dimulai: ${formatDateTime(task.activeStartTime)}</span>
+        ` : `
+          <!-- Task idle: tampilkan tombol Mulai -->
+          <button
+            class="btn-start-task flex items-center gap-2 bg-green-700 hover:bg-green-600 active:bg-green-800 text-white font-semibold text-sm px-5 py-2.5 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-green-400"
+            data-task-id="${task.id}"
+            aria-label="Mulai task ${escHtml(task.name)}">
+            <svg class="w-4 h-4 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <polygon points="5 3 19 12 5 21 5 3"/>
+            </svg>
+            Mulai
+          </button>
+        `}
+      </div>
+    </div>
+
+    <!-- ===== RIWAYAT PENYELESAIAN TASK ===== -->
+    ${(task.records && task.records.length > 0) ? `
+    <div class="border-t border-gray-800 px-5 py-4">
+      <p class="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-2">Riwayat Penyelesaian Task</p>
+      <ul class="space-y-2" aria-label="Riwayat penyelesaian task ${escHtml(task.name)}">
+        ${task.records.map(r => renderTaskRecordItem(task, r)).join('')}
+      </ul>
+    </div>
+    ` : ''}
 
     <!-- Milestones section -->
     <div class="border-t border-gray-800 px-5 py-4">
@@ -397,6 +474,47 @@ function renderRecordItem(task, milestone, record) {
           data-milestone-id="${milestone.id}"
           data-record-id="${record.id}"
           aria-label="Hapus riwayat penyelesaian ini">
+          <svg class="w-3 h-3 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <!-- Waktu mulai & selesai -->
+      <div class="mt-1 grid grid-cols-2 gap-1">
+        <div>
+          <span class="text-xs text-gray-500">Mulai</span>
+          <p class="text-xs text-gray-300 font-mono">${formatDateTime(record.startTime)}</p>
+        </div>
+        <div>
+          <span class="text-xs text-gray-500">Selesai</span>
+          <p class="text-xs text-gray-300 font-mono">${formatDateTime(record.endTime)}</p>
+        </div>
+      </div>
+    </li>`;
+}
+
+/**
+ * Buat HTML untuk satu record penyelesaian TASK (Mulai→Selesai)
+ * @param {object} task
+ * @param {object} record - TaskRecord
+ * @returns {string}
+ */
+function renderTaskRecordItem(task, record) {
+  const st = determineStatus(record.endTime, task.deadlineTarget, task.deadlineGrace, task.deadlineHard);
+  const duration = record.duration || formatDuration(record.startTime, record.endTime);
+
+  return `
+    <li class="border ${st.borderClass} ${st.bgClass} rounded-lg px-3 py-2">
+      <!-- Status badge + durasi -->
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <span class="text-xs font-semibold ${st.colorClass}">${st.label}</span>
+        <span class="text-xs text-gray-500">Durasi: <strong class="text-gray-300">${duration}</strong></span>
+        <!-- Tombol hapus task record -->
+        <button
+          class="btn-delete-task-record ml-auto text-gray-600 hover:text-red-400 transition-colors focus:outline-none focus:ring-1 focus:ring-red-500 rounded"
+          data-task-id="${task.id}"
+          data-record-id="${record.id}"
+          aria-label="Hapus riwayat penyelesaian task ini">
           <svg class="w-3 h-3 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
@@ -567,6 +685,8 @@ function handleAddTask() {
     deadlineGrace:  graceEl.value  ? localInputToISO(graceEl.value)  : '',
     deadlineHard:   hardEl.value   ? localInputToISO(hardEl.value)   : '',
     createdAt: new Date().toISOString(),
+    activeStartTime: null, // null = task belum dimulai / sudah selesai
+    records: [],           // riwayat penyelesaian task (Mulai→Selesai)
     milestones: [],
   };
 
@@ -704,11 +824,61 @@ document.getElementById('task-list').addEventListener('click', function (e) {
     return;
   }
 
-  // Hapus record
+  // Hapus record milestone
   if (target.closest('.btn-delete-record')) {
     const btn = target.closest('.btn-delete-record');
     if (confirm('Hapus riwayat penyelesaian ini?')) {
       deleteRecord(btn.dataset.taskId, btn.dataset.milestoneId, btn.dataset.recordId);
+      renderAll();
+    }
+    return;
+  }
+
+  // ===== Tombol MULAI task =====
+  if (target.closest('.btn-start-task')) {
+    const taskId = target.closest('.btn-start-task').dataset.taskId;
+    const tasks = loadTasks();
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return;
+    // Catat waktu mulai real-time
+    task.activeStartTime = new Date().toISOString();
+    saveTasks(tasks);
+    renderAll(); // re-render agar tombol berubah ke "Selesai"
+    return;
+  }
+
+  // ===== Tombol SELESAI task =====
+  if (target.closest('.btn-stop-task')) {
+    const taskId = target.closest('.btn-stop-task').dataset.taskId;
+    const tasks = loadTasks();
+    const task = tasks.find(t => t.id === taskId);
+    if (!task || !task.activeStartTime) return;
+
+    const endTime = new Date().toISOString();
+    const startTime = task.activeStartTime;
+    const duration = formatDuration(startTime, endTime);
+
+    // Simpan record penyelesaian
+    if (!task.records) task.records = [];
+    task.records.unshift({
+      id: generateId(),
+      startTime,
+      endTime,
+      duration,
+    });
+
+    // Reset status aktif
+    task.activeStartTime = null;
+    saveTasks(tasks);
+    renderAll();
+    return;
+  }
+
+  // ===== Hapus TaskRecord =====
+  if (target.closest('.btn-delete-task-record')) {
+    const btn = target.closest('.btn-delete-task-record');
+    if (confirm('Hapus riwayat penyelesaian task ini?')) {
+      deleteTaskRecord(btn.dataset.taskId, btn.dataset.recordId);
       renderAll();
     }
     return;
@@ -749,18 +919,50 @@ document.getElementById('milestone-name').addEventListener('keydown', function (
 });
 
 // ============================================================
-// LIVE CLOCK
+// LIVE CLOCK & ELAPSED TIMER TICKER
 // ============================================================
 
 /**
- * Perbarui tampilan jam setiap detik
+ * Perbarui jam header (waktu saat ini) setiap detik.
+ * Juga memperbarui semua elapsed timer di task yang sedang aktif
+ * tanpa harus re-render seluruh DOM.
  */
 function updateLiveClock() {
   const now = new Date();
-  const timeStr = now.toLocaleTimeString('id-ID', {
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+
+  // -- Update jam header --
+  const timeEl = document.getElementById('live-clock-time');
+  if (timeEl) {
+    timeEl.textContent = now.toLocaleTimeString('id-ID', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    });
+  }
+
+  // -- Update label zona waktu (hanya perlu sekali, cek pakai flag) --
+  const tzEl = document.getElementById('live-clock-tz');
+  if (tzEl && !tzEl.dataset.set) {
+    // Ambil nama zona waktu singkat dari Intl API
+    const tzName = Intl.DateTimeFormat('id-ID', { timeZoneName: 'short' })
+      .formatToParts(now)
+      .find(p => p.type === 'timeZoneName');
+    // Tambahkan offset UTC secara eksplisit, misal "WIB (UTC+7)"
+    const offsetMinutes = -now.getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? '+' : '-';
+    const absH = Math.floor(Math.abs(offsetMinutes) / 60);
+    const absM = Math.abs(offsetMinutes) % 60;
+    const offsetStr = absM ? `UTC${sign}${absH}:${String(absM).padStart(2,'0')}` : `UTC${sign}${absH}`;
+    tzEl.textContent = tzName ? `${tzName.value} (${offsetStr})` : offsetStr;
+    tzEl.dataset.set = '1'; // jangan update terus tiap detik
+  }
+
+  // -- Update semua elapsed timer yang sedang berjalan --
+  // Cukup update textContent span yang ada di DOM, tidak perlu full re-render
+  document.querySelectorAll('.task-elapsed-timer').forEach(el => {
+    const startISO = el.dataset.start;
+    if (startISO) {
+      el.textContent = formatDuration(startISO, now.toISOString());
+    }
   });
-  document.getElementById('live-clock').textContent = timeStr;
 }
 
 // Jalankan segera dan setiap detik
